@@ -1,0 +1,9 @@
+
+chromadb
+sentence-transformers 
+pypdf
+transformers
+accelerate
+
+
+
