@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriBot Voice Mode</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .chat-container { width: 90%; max-width: 500px; height: 60vh; overflow-y: auto; background: #2d2d2d; border-radius: 15px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 15px; }
+        .bubble { padding: 12px 18px; border-radius: 20px; max-width: 80%; line-height: 1.5; font-size: 15px; }
+        .user { background: #4CAF50; align-self: flex-end; border-bottom-right-radius: 5px; }
+        .bot { background: #3d3d3d; align-self: flex-start; border-bottom-left-radius: 5px; }
+        .controls { margin-top: 30px; text-align: center; }
+        .mic-btn { background: #4CAF50; color: white; border: none; border-radius: 50%; width: 80px; height: 80px; font-size: 30px; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4); }
+        .mic-btn.recording { background: #F44336; box-shadow: 0 0 20px rgba(244, 67, 54, 0.8); animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
+        .status { margin-top: 15px; color: #aaa; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <h2 style="color: #4CAF50;">🌱 AgriBot Live</h2>
+    
+    <div class="chat-container" id="chatBox">
+        <div class="bubble bot">Halo! Saya AgriBot. Tekan tombol mikrofon di bawah untuk mulai mengobrol dengan saya secara langsung!</div>
+    </div>
+
+    <div class="controls">
+        <button class="mic-btn" id="micBtn">🎤</button>
+        <div class="status" id="statusText">Klik untuk mulai bicara</div>
+    </div>
+
+    <script>
+        let ws = new WebSocket("ws://localhost:8000/ws/voice");
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        const micBtn = document.getElementById("micBtn");
+        const statusText = document.getElementById("statusText");
+        const chatBox = document.getElementById("chatBox");
+
+        function addMessage(text, sender) {
+            const div = document.createElement("div");
+            div.className = `bubble ${sender}`;
+            div.textContent = text;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Tangani pesan dari Server
+        ws.onmessage = async (event) => {
+            if (typeof event.data === "string") {
+                const data = JSON.parse(event.data);
+                if (data.type === "transcript") {
+                    addMessage(data.text, "user");
+                } else if (data.type === "response") {
+                    addMessage(data.text, "bot");
+                    statusText.textContent = "AgriBot sedang berbicara...";
+                } else if (data.type === "error") {
+                    statusText.textContent = data.text;
+                }
+            } else {
+                // Jika menerima data Biner (File Audio)
+                const audioBlob = new Blob([event.data], { type: 'audio/mp3' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.play();
+                audio.onended = () => { statusText.textContent = "Klik untuk mulai bicara"; };
+            }
+        };
+
+        // Konfigurasi Perekaman Mikrofon
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.ondataavailable = e => {
+                if (e.data.size > 0) audioChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                ws.send(audioBlob); // Kirim suara ke server
+                audioChunks = [];
+                statusText.textContent = "Memproses suara...";
+            };
+        }).catch(err => {
+            alert("Harap izinkan akses mikrofon!");
+        });
+
+        // Kontrol Tombol Mikrofon
+        micBtn.onclick = () => {
+            if (!isRecording) {
+                mediaRecorder.start();
+                micBtn.classList.add("recording");
+                statusText.textContent = "Mendengarkan... (Klik lagi untuk kirim)";
+                isRecording = true;
+            } else {
+                mediaRecorder.stop();
+                micBtn.classList.remove("recording");
+                isRecording = false;
+            }
+        };
+    </script>
+</body>
+</html>

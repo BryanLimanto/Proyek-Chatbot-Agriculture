@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+from dotenv import load_dotenv
 from backend2 import KnowledgeBaseChatbot # Pastikan nama file sesuai
 
 # ==========================================

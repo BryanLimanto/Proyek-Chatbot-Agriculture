@@ -6,6 +6,7 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from pypdf import PdfReader
 
+# --- KONFIGURASI ---
 DATASET_DIR = "./dataset"
 CHROMA_DIR = "./chroma_db"
 
@@ -23,34 +24,57 @@ PDF_MAPPING = {
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 
-def normalize_text(text: str) -> str:
+# --- FUNGSI DATA CLEANING OTOMATIS ---
+
+def clean_text_advanced(text: str) -> str:
     """
-    Normalisasi teks dengan:
-    1. Lowercase
-    2. Hapus whitespace berlebih
-    3. (Opsional) Hapus tanda baca
+    Membersihkan noise spesifik dari ekstraksi PDF.
     """
-    # Lowercase
-    text = text.lower()
+    # 1. Hapus nomor halaman (angka sendirian di awal/akhir baris)
+    text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
     
-    # Hapus whitespace berlebih (spasi, tab, newline)
-    text = re.sub(r'\s+', ' ', text).strip()
+    # 2. Gabungkan kata yang terputus tanda hubung di akhir baris (misal: penya- kit)
+    text = re.sub(r'(\w+)-\s*\n(\w+)', r'\1\2', text)
     
-    # Opsional: Hapus tanda baca (tidak semua kasus perlu)
-    # Uncomment jika diperlukan
-    # text = re.sub(r'[^\w\s]', '', text)
+    # 3. Hapus karakter non-printable/aneh yang sering muncul di PDF lama
+    text = re.sub(r'[^\x00-\x7F]+', ' ', text) 
+    
+    # 4. Hapus sisa-sisa watermark atau header berulang (Contoh: "Halaman x dari y")
+    text = re.sub(r'(?i)halaman\s+\d+\s+dari\s+\d+', '', text)
     
     return text
+
+def normalize_text(text: str) -> str:
+    """
+    Normalisasi akhir untuk keperluan embedding.
+    """
+    # Lowercase untuk konsistensi
+    text = text.lower()
+    
+    # Hapus whitespace berlebih (newline, tab jadi satu spasi)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Hapus karakter spesial yang tidak bermakna tapi simpan tanda baca penting (. , ?)
+    text = re.sub(r'[^\w\s\.,\?\!]', '', text)
+    
+    return text
+
+# --- FUNGSI CORE ---
 
 def load_pdf_text(path: str) -> str:
     reader = PdfReader(path)
-    text = ""
+    full_text = []
     for page in reader.pages:
-        if page.extract_text():
-            text += page.extract_text() + "\n"
-    return text
+        page_text = page.extract_text()
+        if page_text:
+            # Clean per halaman agar noise header/footer hilang lebih efektif
+            cleaned_page = clean_text_advanced(page_text)
+            full_text.append(cleaned_page)
+    
+    return "\n".join(full_text)
 
 def chunk_text(text: str):
+    # Menggunakan metode sederhana atau bisa ganti ke RecursiveCharacterTextSplitter dari Langchain
     chunks = []
     start = 0
     while start < len(text):
@@ -60,91 +84,73 @@ def chunk_text(text: str):
     return chunks
 
 def create_content_fingerprint(text: str) -> str:
-    """
-    Membuat hash SHA256 dari teks yang sudah dinormalisasi.
-    Hash ini akan digunakan sebagai ID yang deterministik.
-    """
-    normalized_text = normalize_text(text)
-    return hashlib.sha256(normalized_text.encode('utf-8')).hexdigest()
+    # Fingerprint harus dibuat dari teks yang SUDAH dinormalisasi
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-# PERUBAHAN: Gunakan model multilingual E5
+# --- MAIN EXECUTION ---
+
 embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="intfloat/multilingual-e5-small"
 )
 
-# PERUBAHAN: Gunakan PersistentClient, bukan Client
-client = chromadb.PersistentClient(
-    path=CHROMA_DIR,
-    settings=Settings(anonymized_telemetry=False)
-)
+client = chromadb.PersistentClient(path=CHROMA_DIR)
 
 collection = client.get_or_create_collection(
-    name="test1",
+    name="agri_knowledge_base",
     embedding_function=embedding_fn
 )
 
-# Untuk track chunk yang sudah diproses (opsional)
 processed_chunks = set()
 
 for filename, category in PDF_MAPPING.items():
     pdf_path = os.path.join(DATASET_DIR, filename)
 
     if not os.path.exists(pdf_path):
-        print(f"File tidak ditemukan: {filename}")
+        print(f"⚠️ File tidak ditemukan: {filename}")
         continue
 
-    print(f"Processing {filename} ({category})")
+    print(f"🔍 Processing: {filename} [{category}]")
 
-    text = load_pdf_text(pdf_path)
-    chunks = chunk_text(text)
+    raw_text = load_pdf_text(pdf_path)
+    chunks = chunk_text(raw_text)
 
     documents = []
     metadatas = []
     ids = []
 
     for chunk in chunks:
-        # Normalisasi teks chunk
-        normalized_chunk = normalize_text(chunk)
+        # Step Cleaning & Normalization
+        final_chunk = normalize_text(chunk)
         
-        # Buat content fingerprint
-        chunk_id = create_content_fingerprint(chunk)
-        
-        # Skip jika chunk sudah pernah diproses
-        if chunk_id in processed_chunks:
-            print(f"  Skipping duplicate chunk: {chunk_id[:16]}...")
+        # Validasi minimal panjang chunk (buang jika isinya terlalu pendek/kosong)
+        if len(final_chunk) < 50:
             continue
             
-        # Untuk versi advanced: merge metadata jika ID sudah ada
-        # Di sini kita skip dulu, atau bisa implementasi logika merge
-        existing_ids = collection.get(ids=[chunk_id], include=["metadatas"])
-        if existing_ids['ids']:
-            print(f"  Chunk already exists in DB: {chunk_id[:16]}...")
-            # OPSIONAL: Update metadata untuk menambahkan source baru
-            # existing_metadata = existing_ids['metadatas'][0]
-            # if filename not in existing_metadata.get('sources', []):
-            #     # Update logic here
-            #     pass
+        chunk_id = create_content_fingerprint(final_chunk)
+        
+        # Deduplication check
+        if chunk_id in processed_chunks:
+            continue
+            
+        # Cek ke DB agar tidak insert ulang jika script dijalankan lagi
+        existing = collection.get(ids=[chunk_id])
+        if existing['ids']:
+            processed_chunks.add(chunk_id)
             continue
         
-        documents.append(normalized_chunk)
+        documents.append(final_chunk)
         metadatas.append({
             "kategori": category,
-            "source": filename,
-            # Opsional: tambahkan field original_length untuk referensi
-            "original_length": len(chunk)
+            "source": filename
         })
         ids.append(chunk_id)
         processed_chunks.add(chunk_id)
 
-    # Tambahkan ke koleksi jika ada dokumen baru
     if documents:
-        collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids
-        )
-        print(f"  Added {len(documents)} new chunks from {filename}")
+        collection.add(documents=documents, metadatas=metadatas, ids=ids)
+        print(f" ✅ Berhasil tambah {len(documents)} chunk baru.")
     else:
-        print(f"  No new chunks from {filename}")
+        print(f" ℹ️ Tidak ada data baru untuk file ini.")
 
-print(f"Embedding selesai. Total unique chunks: {len(processed_chunks)}")
+print(f"\n--- SELESAI ---")
+print(f"Total Unique Chunks di Database: {collection.count()}")

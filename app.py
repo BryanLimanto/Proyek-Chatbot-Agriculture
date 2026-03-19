@@ -1,165 +1,176 @@
 import streamlit as st
 import time
 from PIL import Image
-# Import class dari backend baru
-from backend import KnowledgeBaseChatbot, PlantDiseaseClassifier
+# Memastikan backend.py berada di direktori yang sama
 from dotenv import load_dotenv
-
-load_dotenv()
-api_key = os.getenv("GROQ_API_KEY")
+from backend import KnowledgeBaseChatbot, PlantDiseaseClassifier
 
 # ==========================================
 # KONFIGURASI HALAMAN
 # ==========================================
 st.set_page_config(
-    page_title="Agri-Chatbot AI (Groq)",
+    page_title="AgriBot AI - Kelola Penyakit Tanaman",
     page_icon="🌱",
     layout="wide"
 )
 
-st.title("🌱 Asisten Cerdas Pertanian (Groq Powered)")
-st.markdown("Sistem Multimodal: Deteksi penyakit tanaman & Konsultasi Cepat.")
+# Custom CSS untuk mempercantik tampilan chat
+st.markdown("""
+    <style>
+    .stChatMessage {
+        border-radius: 15px;
+        margin-bottom: 10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
+st.title("🌱 AgriBot: Asisten Spesialis Kentang, Cabai, & Jagung")
+st.markdown("Sistem ini menggunakan **Automata Intent Recognition** untuk memahami kebutuhan Anda.")
+
+# ==========================================
+# API KEY & CONFIG
+# ==========================================
+load_dotenv()
+api_key = os.getenv("GROQ_API_KEY")
 
 # ==========================================
 # INISIALISASI SISTEM (CACHED)
 # ==========================================
-@st.cache_resource(show_spinner="Sedang menghubungkan ke Groq Cloud & Vision Model...")
+@st.cache_resource(show_spinner="Menyiapkan Otak AgriBot...")
 def load_system():
-    # 1. Konfigurasi Chatbot
-    CHROMA_DIR = "./chroma_db"
-    COLLECTION_NAME = "knowledge_base_new2"
-    
+    # Inisialisasi Chatbot RAG
     bot = KnowledgeBaseChatbot(
-        chroma_dir=CHROMA_DIR,
-        collection_name=COLLECTION_NAME,
-        groq_api_key=api_key, # Pass API Key di sini
-        cross_encoder_model="BAAI/bge-reranker-base"
+        chroma_dir="./chroma_db",
+        collection_name="agri2_knowledge_base", 
+        groq_api_key=api_key
     )
 
-    # 2. Konfigurasi Vision Model (TFLite)
+    # Inisialisasi Vision Model
     vision_model = None
     try:
         vision_model = PlantDiseaseClassifier(
             model_path="./model/model_kentang_resnet.tflite",
             labels_path="./model/labels.txt"
         )
-        print("✅ Vision Model berhasil dimuat.")
     except Exception as e:
-        print(f"⚠️ Warning: Vision model gagal dimuat. ({e})")
+        st.warning(f"Sistem Vision sedang maintenance. Mode teks tetap aktif.")
 
     return bot, vision_model
 
-# Load Sistem
-try:
-    chatbot, vision_model = load_system()
-    st.success("Sistem Terhubung! 🚀", icon="✅")
-    time.sleep(1)
-    st.empty()
-except Exception as e:
-    st.error(f"Critical Error: {e}")
-    st.stop()
+# Eksekusi Load
+chatbot, vision_model = load_system()
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR & STATE MANAGEMENT
 # ==========================================
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
 with st.sidebar:
-    st.header("⚙️ Konfigurasi")
-    st.info(f"Engine: Groq Llama 3 70B") # Indikator model
+    st.header("⚙️ Panel Kontrol")
+    st.info("Cakupan Tanaman: \n1. Kentang 🥔\n2. Cabai 🌶️\n3. Jagung 🌽")
     
     st.divider()
-    if st.button("Bersihkan Chat", type="primary"):
+    if st.button("Hapus Riwayat Chat", type="primary"):
         st.session_state.messages = []
         st.rerun()
 
 # ==========================================
-# LOGIKA UTAMA (TABS)
+# LOGIKA ANTARMUKA (TABS)
 # ==========================================
-tab_chat, tab_vision = st.tabs(["💬 Chat & Konsultasi", "📸 Analisis Foto Daun"])
+tab_chat, tab_vision = st.tabs(["💬 Konsultasi Teks", "📸 Identifikasi Foto"])
 
-final_user_query = None
-processed_image = None
+# Variable untuk menangkap input dari kedua tab
+final_query = None
+image_to_process = None
 
-# --- TAB 1: INPUT TEXT MANUAL ---
+# --- TAB 1: KONSULTASI TEKS (Fokus Utama) ---
 with tab_chat:
-    text_input = st.chat_input("Ketik pertanyaan Anda...")
+    # Menampilkan pesan sambutan otomatis jika chat kosong
+    if not st.session_state.messages:
+        with st.chat_message("assistant"):
+            st.markdown("Halo! Saya AgriBot. Saya bisa membantu menjawab pertanyaan tentang hama/penyakit atau mengidentifikasi foto daun Kentang, Cabai, dan Jagung. Ada yang bisa saya bantu?")
+
+    # Chat Input
+    text_input = st.chat_input("Tanyakan sesuatu (misal: 'Coba cek tanaman saya' atau 'Apa itu hama Thrips?')")
     if text_input:
-        final_user_query = text_input
+        final_query = text_input
 
-# --- TAB 2: INPUT FOTO (VISION) ---
+# --- TAB 2: IDENTIFIKASI FOTO (Vision) ---
 with tab_vision:
-    uploaded_file = st.file_uploader("Upload Foto (JPG/PNG)", type=["jpg", "png", "jpeg"])
+    st.subheader("Analisis Kesehatan Tanaman via Foto")
+    uploaded_file = st.file_uploader("Unggah foto daun yang bermasalah", type=["jpg", "jpeg", "png"])
 
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        col1, col2 = st.columns([1, 2])
+    if uploaded_file:
+        img = Image.open(uploaded_file)
+        st.image(img, caption="Foto yang diunggah", width=300)
         
-        with col1:
-            st.image(image, caption='Foto Daun', use_container_width=True)
-        
-        with col2:
-            if st.button("🔍 Analisis Penyakit", type="primary"):
-                if vision_model:
-                    with st.spinner("Sedang menganalisis tekstur daun..."):
-                        prediction = vision_model.predict(image)
-                        label = prediction['class_name']
-                        conf = prediction['confidence'] * 100
-                        
-                        if conf > 60:
-                            st.success(f"**Hasil Deteksi:** {label}")
-                            st.info(f"Keyakinan: {conf:.2f}%")
-                            final_user_query = f"Tanaman saya kena {label}. Apa obatnya?"
-                            processed_image = image
-                        else:
-                            st.warning(f"Terdeteksi: {label}, keyakinan rendah ({conf:.2f}%).")
-                else:
-                    st.error("Model Vision tidak aktif.")
+        if st.button("Mulai Analisis Gambar", key="run_vision"):
+            if vision_model:
+                with st.spinner("Menganalisis pola morfologi daun..."):
+                    prediction = vision_model.predict(img)
+                    label = prediction['class_name']
+                    conf = prediction['confidence'] * 100
+                    
+                    # Tampilkan hasil di UI tab vision
+                    st.success(f"**Prediksi:** {label} ({conf:.1f}%)")
+                    
+                    # Lempar ke alur chat untuk penjelasan RAG
+                    final_query = f"Tanaman saya terdeteksi terkena {label}. Berikan penjelasan dan cara menanganinya."
+                    image_to_process = img
+            else:
+                st.error("Model Vision tidak tersedia.")
 
 # ==========================================
-# PROSES CHATBOT (RAG)
+# PEMROSESAN LOGIKA (INTENT & RAG)
 # ==========================================
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Tampilkan riwayat chat
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        if msg.get("image"):
+            st.image(msg["image"], width=150)
+        st.markdown(msg["content"])
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        if message.get("image_data"):
-            st.image(message["image_data"], width=200)
-        st.markdown(message["content"])
-
-if final_user_query:
+# Proses input baru (baik dari teks maupun hasil vision)
+if final_query:
+    # 1. Tampilkan Pesan User
     with st.chat_message("user"):
-        if processed_image:
-            st.image(processed_image, width=200)
-        st.markdown(final_user_query)
+        if image_to_process:
+            st.image(image_to_process, width=150)
+        st.markdown(final_query)
     
     st.session_state.messages.append({
         "role": "user", 
-        "content": final_user_query,
-        "image_data": processed_image
+        "content": final_query, 
+        "image": image_to_process
     })
 
-    # PROSES KE BACKEND
-    with st.spinner("🤖 Groq AI sedang mengetik..."):
+    # 2. Respon Bot (Menggunakan Intent Recognition dari Backend)
+    with st.spinner("AgriBot sedang berpikir..."):
         try:
-            result = chatbot.chat(query=final_user_query, n_results=4)
-            response_text = result['response']
+            # Memanggil fungsi chat di backend.py yang sudah kita modifikasi dengan _get_intent
+            result = chatbot.chat(query=final_query)
             
+            response_text = result['response']
+            intent_type = result['metadata'].get('intent')
+
             with st.chat_message("assistant"):
                 st.markdown(response_text)
                 
-                # Tampilkan Sumber jika ada (bukan social chat)
-                if result['search_results']:
-                    with st.expander("📚 Sumber Referensi"):
-                        for res in result['search_results']:
-                            st.caption(f"**{res['chunk_source']}** ({res['similarity_percent']:.1f}%)")
-                            st.text(res['document'][:150] + "...")
+                # Logic Automata: Jika intent adalah 'COBA', berikan penekanan visual
+                if intent_type == "INTENT_COBA":
+                    st.warning("Pemberitahuan: Silakan gunakan tombol unggah di Tab 'Identifikasi Foto' untuk memulai proses deteksi gambar.")
 
-            st.session_state.messages.append({
-                "role": "assistant", 
-                "content": response_text
-            })
-            
+                # Tampilkan Referensi jika ada hasil RAG
+                if result.get('search_results'):
+                    with st.expander("📚 Referensi Dataset PDF"):
+                        for res in result['search_results']:
+                            st.caption(f"Dokumen: {res['chunk_source']} | Skor: {res['similarity_percent']:.1f}%")
+                            st.write(f"_{res['document'][:200]}..._")
+
+            # Simpan Respon ke Session State
+            st.session_state.messages.append({"role": "assistant", "content": response_text})
+
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Maaf, terjadi kendala teknis: {str(e)}")
